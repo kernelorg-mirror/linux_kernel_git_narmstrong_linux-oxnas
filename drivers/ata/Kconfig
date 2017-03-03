@@ -476,6 +476,15 @@ config SATA_NV
 
 	  If unsure, say N.
 
+config SATA_OX810SE
+	tristate "Oxford Semiconductor OX810SE SoC SATA support"
+	depends on MACH_OX810SE || COMPILE_TEST
+	help
+	  This option enables support for Oxford Semiconductor OX810SE SoC
+	  Serial ATA controller.
+
+	  If unsure, say N.
+
 config SATA_PROMISE
 	tristate "Promise SATA TX2/TX4 support"
 	depends on PCI
