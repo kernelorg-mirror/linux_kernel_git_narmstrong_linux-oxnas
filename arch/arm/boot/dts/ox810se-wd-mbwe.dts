@@ -103,6 +103,15 @@
 	};
 };
 
+&dma {
+	status = "okay";
+};
+
+&sata {
+	status = "okay";
+	nr-ports = <2>;
+};
+
 &uart1 {
 	status = "okay";
 
