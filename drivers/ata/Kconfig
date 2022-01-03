@@ -479,6 +479,8 @@ config SATA_NV
 config SATA_OX810SE
 	tristate "Oxford Semiconductor OX810SE SoC SATA support"
 	depends on MACH_OX810SE || COMPILE_TEST
+	select SATA_HOST
+	select OXNAS_DMA
 	help
 	  This option enables support for Oxford Semiconductor OX810SE SoC
 	  Serial ATA controller.
