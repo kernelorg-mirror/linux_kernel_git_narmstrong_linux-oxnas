@@ -1257,7 +1257,7 @@ static enum ata_completion_errors ox810sata_qc_prep(struct ata_queued_cmd *qc)
 	if (ata_tag_internal(qc->tag)) {
 		tries = 3;
 		while ((!ox810sata_core_idle_wait(priv) ||
-		        ox810sata_dma_busy_check(qc->ap)) && tries-- > 0) {
+			ox810sata_dma_busy_check(qc->ap)) && tries-- > 0) {
 			if (ox810sata_cleanup(ap))
 				break;
 		}
@@ -1266,7 +1266,7 @@ static enum ata_completion_errors ox810sata_qc_prep(struct ata_queued_cmd *qc)
 	// get raid settings from the bio if they exist
 	if (qc->scsicmd) {
 		struct request *req = scsi_cmd_to_rq(qc->scsicmd);
-		
+
 		if (req && req->bio && priv->hw_raid_active != raid_reg) {
 			pr_info("hardware RAID %s", raid_reg ? "activated" : "deactivated");
 			priv->hw_raid_active = raid_reg;
@@ -1351,10 +1351,8 @@ static unsigned int ox810sata_qc_issue(struct ata_queued_cmd *qc)
 			}
 			dmaengine_slave_config(priv->chan, &sconf);
 			priv->desc = dmaengine_prep_slave_sg(priv->chan, qc->sg,
-								    qc->n_elem,
-								    qc->dma_dir,
-								    DMA_PREP_INTERRUPT |
-								    DMA_CTRL_ACK);
+							     qc->n_elem, qc->dma_dir,
+							     DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
 			if (!NULLPTR(priv->desc)) {
 				priv->desc->callback = ox810sata_dma_callback;
 				priv->desc->callback_param = ap;
@@ -1406,6 +1404,7 @@ static irqreturn_t ox810sata_irq_handler(int irq, void *dev_instance)
 		cnr = 0;
 		while (cnr < 3) {
 			u32 i = ox810sata_ioportraid_read(ap, INT_STATUS) & INT_USED;
+
 			if (!i)
 				break;
 
