@@ -1577,11 +1577,14 @@ static struct ata_port_operations ox810sata_port_ops = {
  * in the libata library that handle top level comands from the SCSI library
  */
 static struct scsi_host_template ox810sata_sht = {
-	ATA_NCQ_SHT(DRIVER_NAME),
+	__ATA_BASE_SHT(DRV_NAME),
 	.can_queue = SATA_OXNAS_QUEUE_DEPTH,
 	.sg_tablesize = SATA_OXNAS_MAX_PRD,
 	.dma_boundary = SATA_OXNAS_DMA_BOUNDARY,
-	.unchecked_isa_dma = 0,
+	.tag_alloc_policy = BLK_TAG_ALLOC_RR,
+	.sdev_attrs = ata_ncq_sdev_attrs,
+	.change_queue_depth = ata_scsi_change_queue_depth,
+	.slave_configure = ata_scsi_slave_config
 };
 
 /*
