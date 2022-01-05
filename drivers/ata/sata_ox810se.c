@@ -665,11 +665,12 @@ static u8 ox810sata_check_status(struct ata_port *ap)
 {
 	struct ox810sata_host_priv *priv = (struct ox810sata_host_priv *)ap->host->private_data;
 	u8 status;
+	u32 reg;
 
 	status = ox810sata_ioportraid_read(ap, ORB2) >> 24;
 
 	// check for the drive going missing indicated by SCR status bits 0-3 = 0
-	u32 reg = ox810sata_check_link(ap);
+	reg = ox810sata_check_link(ap);
 
 	if (priv->hw_raid_active)
 		reg |= ox810sata_check_link(ox810sata_other_ap(ap));
