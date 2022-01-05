@@ -1264,8 +1264,10 @@ static enum ata_completion_errors ox810sata_qc_prep(struct ata_queued_cmd *qc)
 	}
 
 	// get raid settings from the bio if they exist
-	if (qc->scsicmd && qc->scsicmd->request && qc->scsicmd->request->bio) {
-		if (priv->hw_raid_active != raid_reg) {
+	if (qc->scsicmd) {
+		struct request *req = scsi_cmd_to_rq(qc->scsicmd);
+		
+		if (req && req->bio && priv->hw_raid_active != raid_reg) {
 			pr_info("hardware RAID %s", raid_reg ? "activated" : "deactivated");
 			priv->hw_raid_active = raid_reg;
 		}
@@ -1582,9 +1584,9 @@ static struct scsi_host_template ox810sata_sht = {
 	.sg_tablesize = SATA_OXNAS_MAX_PRD,
 	.dma_boundary = SATA_OXNAS_DMA_BOUNDARY,
 	.tag_alloc_policy = BLK_TAG_ALLOC_RR,
-	.sdev_attrs = ata_ncq_sdev_attrs,
+	.slave_configure = ata_scsi_slave_config,
+	.sdev_groups = ata_ncq_sdev_groups,
 	.change_queue_depth = ata_scsi_change_queue_depth,
-	.slave_configure = ata_scsi_slave_config
 };
 
 /*
