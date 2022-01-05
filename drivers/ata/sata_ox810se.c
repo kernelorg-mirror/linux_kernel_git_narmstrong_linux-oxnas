@@ -240,10 +240,13 @@ enum {
 	SERROR_IRQ_MASK = 5,
 };
 
+struct ox810sata_host_priv;
+
 /*
  * Structs to hold host and per-port private (specific to this driver) datas
  */
 struct ox810sata_port_priv {
+	struct ox810sata_host_priv *priv;
 	struct ata_port *port;
 	struct ata_queued_cmd *active_qc;
 
@@ -266,9 +269,6 @@ struct ox810sata_host_priv {
 	struct dma_async_tx_descriptor *desc;
 };
 
-/* TODO remove this from global */
-static struct ox810sata_host_priv ox810sata_hd = { 0 };
-
 /*
  * TODO remove that until HW-RAID support is added
  * A record of which drives have accumulated raid faults. A set bit indicates
@@ -276,20 +276,20 @@ static struct ox810sata_host_priv ox810sata_hd = { 0 };
  */
 static u32 ox810sata_accumulated_RAID_faults;
 
-static int ox810sata_port_no(struct ata_port *const ap)
+static int ox810sata_port_no(struct ox810sata_host_priv *priv, struct ata_port *const ap)
 {
 	if (NULLPTR(ap))
 		return 0;
 
-	return ox810sata_hd.host->ports[0] == ap ? 0 : 1;
+	return priv->host->ports[0] == ap ? 0 : 1;
 }
 
-static int ox810sata_other_port_no(struct ata_port *const ap)
+static int ox810sata_other_port_no(struct ox810sata_host_priv *priv, struct ata_port *const ap)
 {
 	if (NULLPTR(ap))
 		return 1;
 
-	return ox810sata_hd.host->ports[0] == ap ? 1 : 0;
+	return priv->host->ports[0] == ap ? 1 : 0;
 }
 
 /*
@@ -299,14 +299,14 @@ static int ox810sata_other_port_no(struct ata_port *const ap)
  * @param ap pointer to the appropriate ata_port structure
  * @return the base address of the SATA core
  */
-static void __iomem *ox810sata_iocore(void)
+static void __iomem *ox810sata_iocore(struct ox810sata_host_priv *priv)
 {
-	return ox810sata_hd.iomap + CORE_BASE;
+	return priv->iomap + CORE_BASE;
 }
 
-static void __iomem *ox810sata_ioport(struct ata_port *const ap)
+static void __iomem *ox810sata_ioport(struct ox810sata_host_priv *priv, struct ata_port *const ap)
 {
-	return ox810sata_hd.iomap + ox810sata_port_no(ap) * PORT_SIZE;
+	return priv->iomap + ox810sata_port_no(priv, ap) * PORT_SIZE;
 }
 
 /*
@@ -317,12 +317,13 @@ static void __iomem *ox810sata_ioport(struct ata_port *const ap)
  * @param ap pointer to the appropriate ata_port structure
  * @return the base address of the SATA core
  */
-static void __iomem *ox810sata_ioportraid(struct ata_port *const ap)
+static void __iomem *ox810sata_ioportraid(struct ox810sata_host_priv *priv,
+					  struct ata_port *const ap)
 {
-	if (ox810sata_hd.hw_raid_active && ox810sata_hd.active_ap == ap)
-		return ox810sata_hd.iomap + RAID_BASE;
+	if (priv->hw_raid_active && priv->active_ap == ap)
+		return priv->iomap + RAID_BASE;
 
-	return ox810sata_ioport(ap);
+	return ox810sata_ioport(priv, ap);
 }
 
 static inline u32 ox810sata_io_read(void __iomem *io)
@@ -330,21 +331,23 @@ static inline u32 ox810sata_io_read(void __iomem *io)
 	return readl(io);
 }
 
-static inline u32 ox810sata_iocore_read(unsigned int reg)
+static inline u32 ox810sata_iocore_read(struct ox810sata_host_priv *priv, unsigned int reg)
 {
-	return ox810sata_io_read(ox810sata_iocore() + reg);
+	return ox810sata_io_read(ox810sata_iocore(priv) + reg);
 }
 
-static inline u32 ox810sata_ioport_read(struct ata_port *const ap,
+static inline u32 ox810sata_ioport_read(struct ox810sata_host_priv *priv,
+					struct ata_port *const ap,
 					unsigned int reg)
 {
-	return ox810sata_io_read(ox810sata_ioport(ap) + reg);
+	return ox810sata_io_read(ox810sata_ioport(priv, ap) + reg);
 }
 
-static inline u32 ox810sata_ioportraid_read(struct ata_port *const ap,
+static inline u32 ox810sata_ioportraid_read(struct ox810sata_host_priv *priv,
+					    struct ata_port *const ap,
 					    unsigned int reg)
 {
-	return ox810sata_io_read(ox810sata_ioportraid(ap) + reg);
+	return ox810sata_io_read(ox810sata_ioportraid(priv, ap) + reg);
 }
 
 static inline void ox810sata_io_andor(void __iomem *io, u32 andmask, u32 orval)
@@ -358,90 +361,94 @@ static inline void ox810sata_io_andor(void __iomem *io, u32 andmask, u32 orval)
 	wmb();
 }
 
-static inline void ox810sata_iocore_andor(unsigned int reg, u32 andmask,
-					  u32 orval)
-{
-	ox810sata_io_andor(ox810sata_iocore() + reg, andmask, orval);
-}
-
-static inline void ox810sata_ioport_andor(struct ata_port *const ap,
+static inline void ox810sata_iocore_andor(struct ox810sata_host_priv *priv,
 					  unsigned int reg, u32 andmask,
 					  u32 orval)
 {
-	ox810sata_io_andor(ox810sata_ioport(ap) + reg, andmask, orval);
+	ox810sata_io_andor(ox810sata_iocore(priv) + reg, andmask, orval);
 }
 
-static inline void ox810sata_ioportraid_andor(struct ata_port *const ap,
+static inline void ox810sata_ioport_andor(struct ox810sata_host_priv *priv,
+					  struct ata_port *const ap,
+					  unsigned int reg, u32 andmask,
+					  u32 orval)
+{
+	ox810sata_io_andor(ox810sata_ioport(priv, ap) + reg, andmask, orval);
+}
+
+static inline void ox810sata_ioportraid_andor(struct ox810sata_host_priv *priv,
+					      struct ata_port *const ap,
 					      unsigned int reg, u32 andmask,
 					      u32 orval)
 {
-	ox810sata_io_andor(ox810sata_ioportraid(ap) + reg, andmask, orval);
+	ox810sata_io_andor(ox810sata_ioportraid(priv, ap) + reg, andmask, orval);
 }
 
 /*
  * Resetting core and clock helpers
  */
-static void ox810sata_reset_assert(void)
+static void ox810sata_reset_assert(struct ox810sata_host_priv *priv)
 {
-	reset_control_assert(ox810sata_hd.rst_sata);
-	reset_control_assert(ox810sata_hd.rst_link);
-	reset_control_assert(ox810sata_hd.rst_phy);
+	reset_control_assert(priv->rst_sata);
+	reset_control_assert(priv->rst_link);
+	reset_control_assert(priv->rst_phy);
 }
 
-static void ox810sata_reset_deassert(void)
+static void ox810sata_reset_deassert(struct ox810sata_host_priv *priv)
 {
-	reset_control_deassert(ox810sata_hd.rst_phy);
+	reset_control_deassert(priv->rst_phy);
 
 	mdelay(1);
 
-	reset_control_deassert(ox810sata_hd.rst_link);
+	reset_control_deassert(priv->rst_link);
 
 	mdelay(1);
 
-	reset_control_deassert(ox810sata_hd.rst_sata);
+	reset_control_deassert(priv->rst_sata);
 
 	mdelay(1);
 }
 
-static void ox810sata_clock_disable(void)
+static void ox810sata_clock_disable(struct ox810sata_host_priv *priv)
 {
-	clk_disable_unprepare(ox810sata_hd.clk);
+	clk_disable_unprepare(priv->clk);
 }
 
-static void ox810sata_clock_enable(void)
+static void ox810sata_clock_enable(struct ox810sata_host_priv *priv)
 {
-	clk_prepare_enable(ox810sata_hd.clk);
+	clk_prepare_enable(priv->clk);
 }
 
-static struct ata_port *ox810sata_other_ap(struct ata_port *const ap)
+static struct ata_port *ox810sata_other_ap(struct ox810sata_host_priv *priv,
+					   struct ata_port *const ap)
 {
 	if (!NULLPTR(ap)) {
-		int port_no = ox810sata_hd.host->n_ports > 1 ?
-				      ox810sata_other_port_no(ap) :
+		int port_no = priv->host->n_ports > 1 ?
+				      ox810sata_other_port_no(priv, ap) :
 				      0;
 
-		return ox810sata_hd.host->ports[port_no];
+		return priv->host->ports[port_no];
 	}
 
 	return NULL;
 }
 
-static void ox810sata_dma_abort(void)
+static void ox810sata_dma_abort(struct ox810sata_host_priv *priv)
 {
 	const u32 mask = DEVICE_CONTROL_DMABT | DEVICE_CONTROL_ABORT;
 
-	ox810sata_iocore_andor(DEVICE_CONTROL, ~0, mask);
+	ox810sata_iocore_andor(priv, DEVICE_CONTROL, ~0, mask);
 	mdelay(1);
-	ox810sata_iocore_andor(DEVICE_CONTROL, ~mask, 0);
+	ox810sata_iocore_andor(priv, DEVICE_CONTROL, ~mask, 0);
 
-	if (!NULLPTR(ox810sata_hd.chan)) {
-		if (!NULLPTR(ox810sata_hd.desc)) {
-			ox810sata_hd.desc->callback = NULL;
-			if (dmaengine_tx_status(ox810sata_hd.chan,
-						ox810sata_hd.desc->cookie,
+	if (!NULLPTR(priv->chan)) {
+		if (!NULLPTR(priv->desc)) {
+			priv->desc->callback = NULL;
+			if (dmaengine_tx_status(priv->chan,
+						priv->desc->cookie,
 						NULL) == DMA_IN_PROGRESS)
-				dmaengine_terminate_async(ox810sata_hd.chan);
-			ox810sata_hd.desc = NULL;
+				dmaengine_terminate_async(priv->chan);
+			priv->desc = NULL;
 		}
 	}
 }
@@ -486,36 +493,36 @@ static struct ata_queued_cmd *ox810sata_active_qc(struct ata_port *const ap)
 	return qc;
 }
 
-static void ox810sata_send_control_fis(struct ata_port *const ap, const u32 cmd)
+static void ox810sata_send_control_fis(struct ox810sata_host_priv *priv,
+				       struct ata_port *const ap, const u32 cmd)
 {
-	ox810sata_ioportraid_andor(ap, SATA_COMMAND, ~SATA_OPCODE_MASK, cmd);
+	ox810sata_ioportraid_andor(priv, ap, SATA_COMMAND, ~SATA_OPCODE_MASK, cmd);
 }
 
 /* clears errors */
-static void ox810sata_cs_error_clear(struct ata_port *const ap)
+static void ox810sata_cs_error_clear(struct ox810sata_host_priv *priv, struct ata_port *const ap)
 {
 	if (!NULLPTR(ap))
-		ox810sata_ioportraid_andor(ap, SATA_COMMAND, SATA_CTL_ERR_MASK,
-					   0);
+		ox810sata_ioportraid_andor(priv, ap, SATA_COMMAND, SATA_CTL_ERR_MASK, 0);
 }
 
-static void ox810sata_sctl_error_clear(struct ata_port *const ap)
+static void ox810sata_sctl_error_clear(struct ox810sata_host_priv *priv, struct ata_port *const ap)
 {
-	if (ox810sata_hd.hw_raid_active)
-		ox810sata_ioportraid_andor(ap, SATA_CONTROL, RAID_CLR_ERR, 0);
+	if (priv->hw_raid_active)
+		ox810sata_ioportraid_andor(priv, ap, SATA_CONTROL, RAID_CLR_ERR, 0);
 	if (!NULLPTR(ap))
-		ox810sata_ioportraid_andor(ap, SATA_CONTROL, SCTL_CLR_ERR, 0);
+		ox810sata_ioportraid_andor(priv, ap, SATA_CONTROL, SCTL_CLR_ERR, 0);
 }
 
 /*
  * Clears the error caused by the core's registers being accessed when the
  * core is busy.
  */
-static inline void ox810sata_reg_access_error_clear(struct ata_port *ap)
+static inline void ox810sata_reg_access_error_clear(struct ox810sata_host_priv *priv,
+						    struct ata_port *ap)
 {
 	if (!NULLPTR(ap))
-		ox810sata_ioportraid_andor(ap, INT_STATUS, INT_REG_ACCESS_ERR,
-					   0);
+		ox810sata_ioportraid_andor(priv, ap, INT_STATUS, INT_REG_ACCESS_ERR, 0);
 }
 
 /*
@@ -525,9 +532,9 @@ static inline void ox810sata_reg_access_error_clear(struct ata_port *ap)
  *
  * @param ap hardware with the registers in
  */
-static void ox810sata_irq_clear(struct ata_port *const ap)
+static void ox810sata_irq_clear(struct ox810sata_host_priv *priv, struct ata_port *const ap)
 {
-	ox810sata_ioportraid_andor(ap, INT_CLEAR, 0, INT_USED);
+	ox810sata_ioportraid_andor(priv, ap, INT_CLEAR, 0, INT_USED);
 }
 
 /*
@@ -536,13 +543,13 @@ static void ox810sata_irq_clear(struct ata_port *const ap)
  *
  * @param ap Hardware with the registers in
  */
-static void ox810sata_irq_off(struct ata_port *const ap)
+static void ox810sata_irq_off(struct ox810sata_host_priv *priv, struct ata_port *const ap)
 {
 	// disable End of command interrupt
-	ox810sata_ioportraid_andor(ap, INT_DISABLE, 0, INT_USED);
+	ox810sata_ioportraid_andor(priv, ap, INT_DISABLE, 0, INT_USED);
 
 	// Clear pending interrupts
-	ox810sata_irq_clear(ap);
+	ox810sata_irq_clear(priv, ap);
 }
 
 /*
@@ -551,29 +558,29 @@ static void ox810sata_irq_off(struct ata_port *const ap)
  *
  * @param ap Hardware with the registers in
  */
-static void ox810sata_irq_on(struct ata_port *const ap)
+static void ox810sata_irq_on(struct ox810sata_host_priv *priv, struct ata_port *const ap)
 {
 	// Clear pending interrupts
-	ox810sata_irq_clear(ap);
+	ox810sata_irq_clear(priv, ap);
 
-	if (ox810sata_hd.hw_raid_active) {
+	if (priv->hw_raid_active) {
 		// set interrupt mode for raid controller interrupts only
-		ox810sata_iocore_andor(CORE_INT_ENABLE, 0, RAID_INTS_WANTED);
+		ox810sata_iocore_andor(priv, CORE_INT_ENABLE, 0, RAID_INTS_WANTED);
 	} else {
 		// set normal interrupt scheme
-		ox810sata_iocore_andor(CORE_INT_ENABLE, 0, NORMAL_INTS_WANTED);
+		ox810sata_iocore_andor(priv, CORE_INT_ENABLE, 0, NORMAL_INTS_WANTED);
 	}
 
 	// enable End of command interrupt
-	ox810sata_ioportraid_andor(ap, INT_ENABLE, 0, INT_USED);
+	ox810sata_ioportraid_andor(priv, ap, INT_ENABLE, 0, INT_USED);
 }
 
-static void ox810sata_link_wait_ready(struct ata_port *const ap)
+static void ox810sata_link_wait_ready(struct ox810sata_host_priv *priv, struct ata_port *const ap)
 {
 	int patience;
 
 	for (patience = 0x1000000; patience > 0; patience--) {
-		if (ox810sata_ioport_read(ap, LINK_CONTROL) & 1UL)
+		if (ox810sata_ioport_read(priv, ap, LINK_CONTROL) & 1UL)
 			break;
 	}
 }
@@ -583,8 +590,8 @@ static void ox810sata_link_wait_ready(struct ata_port *const ap)
  * @param link_reg the link layer register to access (oxsemi indexing ie
  *        00 = static config, 04 = phy ctrl)
  */
-static u32 ox810sata_link_read(struct ata_port *ap, unsigned int link_reg,
-			       spinlock_t *lock)
+static u32 ox810sata_link_read(struct ox810sata_host_priv *priv, struct ata_port *ap,
+			       unsigned int link_reg, spinlock_t *lock)
 {
 	u32 result;
 	unsigned long flags = 0;
@@ -592,20 +599,20 @@ static u32 ox810sata_link_read(struct ata_port *ap, unsigned int link_reg,
 	if (!NULLPTR(lock) && !in_irq())
 		spin_lock_irqsave(lock, flags);
 
-	ox810sata_link_wait_ready(ap);
+	ox810sata_link_wait_ready(priv, ap);
 
 	/* accessed twice as a workaround for a bug in the SATA abp bridge
 	 * hardware (bug 6828)
 	 */
-	ox810sata_ioport_andor(ap, LINK_RD_ADDR, 0, link_reg);
+	ox810sata_ioport_andor(priv, ap, LINK_RD_ADDR, 0, link_reg);
 
 	// TODO comment
 	wmb();
-	(void)ox810sata_ioport_read(ap, LINK_RD_ADDR);
+	(void)ox810sata_ioport_read(priv, ap, LINK_RD_ADDR);
 
-	ox810sata_link_wait_ready(ap);
+	ox810sata_link_wait_ready(priv, ap);
 
-	result = ox810sata_ioport_read(ap, LINK_DATA);
+	result = ox810sata_ioport_read(priv, ap, LINK_DATA);
 
 	if (!NULLPTR(lock) && !in_irq())
 		spin_unlock_irqrestore(lock, flags);
@@ -624,21 +631,22 @@ static u32 ox810sata_link_read(struct ata_port *ap, unsigned int link_reg,
  * @param sc_reg the SATA PHY register
  * @return the value in the register
  */
-static u32 ox810sata_scr_read_port(struct ata_port *ap, unsigned int sc_reg)
+static u32 ox810sata_scr_read_port(struct ox810sata_host_priv *priv, struct ata_port *ap,
+				   unsigned int sc_reg)
 {
 	struct ox810sata_port_priv *pd = NULLPTR(ap) ? NULL : ap->private_data;
 	spinlock_t *lock = NULLPTR(pd) ? NULL : &pd->scrlock;
 
-	return ox810sata_link_read(ap, SCR2LINK(sc_reg), lock);
+	return ox810sata_link_read(priv, ap, SCR2LINK(sc_reg), lock);
 }
 
 /*
  * @return true if the port has a cable connected
  */
-static u32 ox810sata_check_link(struct ata_port *ap)
+static u32 ox810sata_check_link(struct ox810sata_host_priv *priv, struct ata_port *ap)
 {
 	/* Check for the cable present indicated by SCR status bit-0 set */
-	return ox810sata_scr_read_port(ap, SCR_STATUS) & 0x1;
+	return ox810sata_scr_read_port(priv, ap, SCR_STATUS) & 0x1;
 }
 
 /*
@@ -649,13 +657,17 @@ static u32 ox810sata_check_link(struct ata_port *ap)
  */
 static u8 ox810sata_check_status(struct ata_port *ap)
 {
-	u8 status = ox810sata_ioportraid_read(ap, ORB2) >> 24;
+	struct ox810sata_port_priv *pd = (struct ox810sata_port_priv *)ap->private_data;
+	struct ox810sata_host_priv *priv = pd->priv;
+	u8 status;
+
+	status = ox810sata_ioportraid_read(priv, ap, ORB2) >> 24;
 
 	// check for the drive going missing indicated by SCR status bits 0-3 = 0
-	u32 reg = ox810sata_check_link(ap);
+	u32 reg = ox810sata_check_link(priv, ap);
 
-	if (ox810sata_hd.hw_raid_active)
-		reg |= ox810sata_check_link(ox810sata_other_ap(ap));
+	if (priv->hw_raid_active)
+		reg |= ox810sata_check_link(priv, ox810sata_other_ap(priv, ap));
 
 	if (!reg)
 		status |= ATA_DF | ATA_ERR;
@@ -670,7 +682,7 @@ static bool ox810sata_qc_data_protocol(struct ata_queued_cmd *const qc)
 			      (qc->flags & ATA_QCFLAG_DMAMAP));
 }
 
-static void ox810sata_qc_complete(struct ata_port *const ap,
+static void ox810sata_qc_complete(struct ox810sata_host_priv *priv, struct ata_port *const ap,
 				  const enum ata_completion_errors ac_err)
 {
 	struct ata_queued_cmd *qc;
@@ -688,71 +700,69 @@ static void ox810sata_qc_complete(struct ata_port *const ap,
 	spin_unlock_irqrestore(ap->lock, flags);
 }
 
-static int ox810sata_dma_alloc(void)
+static int ox810sata_dma_alloc(struct ox810sata_host_priv *priv)
 {
 	int rc = 0;
 
-	if (NULLPTR(ox810sata_hd.chan) || IS_ERR(ox810sata_hd.chan))
-		ox810sata_hd.chan =
-			dma_request_chan(&ox810sata_hd.pdev->dev, "sgdma");
-	if (NULLPTR(ox810sata_hd.chan)) {
+	if (NULLPTR(priv->chan) || IS_ERR(priv->chan))
+		priv->chan = dma_request_chan(&priv->pdev->dev, "sgdma");
+	if (NULLPTR(priv->chan)) {
 		pr_err("failed to obtain DMA channel\n");
 		rc = -ENXIO;
-	} else if (IS_ERR(ox810sata_hd.chan)) {
-		rc = PTR_ERR(ox810sata_hd.chan);
+	} else if (IS_ERR(priv->chan)) {
+		rc = PTR_ERR(priv->chan);
 		if (rc == -EPROBE_DEFER)
 			pr_warn("waiting for DMA to initialize\n");
 		else
 			pr_err("error %d allocating DMA channel\n", rc);
-		ox810sata_hd.chan = NULL;
+		priv->chan = NULL;
 	} else {
-		ox810sata_dma_abort();
+		ox810sata_dma_abort(priv);
 	}
 
 	return rc;
 }
 
-static void ox810sata_dma_free(void)
+static void ox810sata_dma_free(struct ox810sata_host_priv *priv)
 {
-	ox810sata_dma_abort();
-	if (!NULLPTR(ox810sata_hd.chan)) {
-		dmaengine_synchronize(ox810sata_hd.chan);
-		dma_release_channel(ox810sata_hd.chan);
-		ox810sata_hd.chan = NULL;
+	ox810sata_dma_abort(priv);
+	if (!NULLPTR(priv->chan)) {
+		dmaengine_synchronize(priv->chan);
+		dma_release_channel(priv->chan);
+		priv->chan = NULL;
 	}
 }
 
-static bool ox810sata_dma_busy_check(struct ata_port *const ap)
+static bool ox810sata_dma_busy_check(struct ox810sata_host_priv *priv, struct ata_port *const ap)
 {
-	struct ata_queued_cmd *qc =
-		NULLPTR(ap) ? NULL : ox810sata_active_qc(ap);
+	struct ata_queued_cmd *qc = NULLPTR(ap) ? NULL : ox810sata_active_qc(ap);
 	bool use_dma = NULLPTR(qc) ? true : ox810sata_qc_data_protocol(qc);
 
-	if (NULLPTR(ox810sata_hd.chan) || !use_dma)
+	if (NULLPTR(priv->chan) || !use_dma)
 		return false;
 
-	return NULLPTR(ox810sata_hd.desc) ?
+	return NULLPTR(priv->desc) ?
 		       false :
-		       dmaengine_tx_status(ox810sata_hd.chan,
-					   ox810sata_hd.desc->cookie,
+		       dmaengine_tx_status(priv->chan,
+					   priv->desc->cookie,
 					   NULL) == DMA_IN_PROGRESS;
 }
 
-static inline bool ox810sata_core_busy_check(void)
+static inline bool ox810sata_core_busy_check(struct ox810sata_host_priv *priv)
 {
-	ox810sata_iocore_andor(IDLE_STATUS, 0, 0);
+	ox810sata_iocore_andor(priv, IDLE_STATUS, 0, 0);
 
-	return (~ox810sata_iocore_read(IDLE_STATUS)) & IDLE_CORES;
+	return (~ox810sata_iocore_read(priv, IDLE_STATUS)) & IDLE_CORES;
 }
 
 /*
  * @return true if idle or false if still busy after timeout
  */
-static bool ox810sata_core_idle_wait(void)
+static bool ox810sata_core_idle_wait(struct ox810sata_host_priv *priv)
 {
 	int q = (IDLE_WAIT_MS * 1000) / ATOMIC_DELAY_US;
 
-	while (ox810sata_core_busy_check()) {
+	while (ox810sata_core_busy_check(priv)) {
 		udelay(ATOMIC_DELAY_US - 1);
 		if (--q <= 0)
 			return false;
@@ -761,48 +771,48 @@ static bool ox810sata_core_idle_wait(void)
 	return true;
 }
 
-static void ox810sata_core_reset_start(void)
+static void ox810sata_core_reset_start(struct ox810sata_host_priv *priv)
 {
 	// Dirty hack for core to operate normally
 	// without additional resets or power triggering
-	ox810sata_iocore_andor(DEVICE_CONTROL, 0, ~0);
+	ox810sata_iocore_andor(priv, DEVICE_CONTROL, 0, ~0);
 	mdelay(CORE_RESET_DELAY_MS);
-	ox810sata_iocore_andor(DEVICE_CONTROL, 0, 0);
+	ox810sata_iocore_andor(priv, DEVICE_CONTROL, 0, 0);
 	mdelay(CORE_RESET_DELAY_MS);
-	ox810sata_iocore_andor(DEVICE_CONTROL, 0, ~0);
+	ox810sata_iocore_andor(priv, DEVICE_CONTROL, 0, ~0);
 	mdelay(CORE_RESET_DELAY_MS);
 
 	// reset Controller, Link and PHY
-	ox810sata_reset_assert();
+	ox810sata_reset_assert(priv);
 	mdelay(CORE_RESET_DELAY_MS);
 }
 
 /*
  * Turns on the cores clock and resets it
  */
-static void ox810sata_core_reset(void)
+static void ox810sata_core_reset(struct ox810sata_host_priv *priv)
 {
 	int i;
 
 	for (i = 0; i < 9; i++) {
-		ox810sata_core_reset_start();
+		ox810sata_core_reset_start(priv);
 
 		// un-reset the PHY, then Link and Controller
-		ox810sata_reset_deassert();
+		ox810sata_reset_deassert(priv);
 		mdelay(CORE_RESET_DELAY_MS);
 
-		if (!ox810sata_core_busy_check())
+		if (!ox810sata_core_busy_check(priv))
 			break;
 	}
 
-	ox810sata_iocore_andor(DEVICE_CONTROL, 0, 0);
+	ox810sata_iocore_andor(priv, DEVICE_CONTROL, 0, 0);
 
 	// disable padding
-	ox810sata_iocore_andor(DEVICE_CONTROL, ~DEVICE_CONTROL_PAD,
+	ox810sata_iocore_andor(priv, DEVICE_CONTROL, ~DEVICE_CONTROL_PAD,
 			       DEVICE_CONTROL_PADPAT);
 }
 
-static void ox810sata_srst_send(struct ata_port *const ap)
+static void ox810sata_srst_send(struct ox810sata_host_priv *priv, struct ata_port *const ap)
 {
 	if (NULLPTR(ap))
 		return;
@@ -811,33 +821,35 @@ static void ox810sata_srst_send(struct ata_port *const ap)
 	ap->ctl &= ~ATA_SRST;
 
 	// write values to registers
-	ox810sata_ioportraid_andor(ap, ORB1, 0, 0);
-	ox810sata_ioportraid_andor(ap, ORB2, 0, 0);
-	ox810sata_ioportraid_andor(ap, ORB3, 0, 0);
-	ox810sata_ioportraid_andor(ap, ORB4, 0, ap->ctl << 24);
+	ox810sata_ioportraid_andor(priv, ap, ORB1, 0, 0);
+	ox810sata_ioportraid_andor(priv, ap, ORB2, 0, 0);
+	ox810sata_ioportraid_andor(priv, ap, ORB3, 0, 0);
+	ox810sata_ioportraid_andor(priv, ap, ORB4, 0, ap->ctl << 24);
+
 	// command the core to send a control FIS
-	ox810sata_send_control_fis(ap, CMD_WRITE_TO_ORB_REGS_NO_COMMAND);
+	ox810sata_send_control_fis(priv, ap, CMD_WRITE_TO_ORB_REGS_NO_COMMAND);
 	mdelay(1);
 
 	// write value to register
-	ox810sata_ioportraid_andor(ap, ORB4, 0, (ap->ctl | ATA_SRST) << 24);
+	ox810sata_ioportraid_andor(priv, ap, ORB4, 0, (ap->ctl | ATA_SRST) << 24);
 
 	// command the core to send a control FIS
-	ox810sata_send_control_fis(ap, CMD_WRITE_TO_ORB_REGS_NO_COMMAND);
+	ox810sata_send_control_fis(priv, ap, CMD_WRITE_TO_ORB_REGS_NO_COMMAND);
 	mdelay(1);
 
 	// write value to register
-	ox810sata_ioportraid_andor(ap, ORB4, 0, ap->ctl << 24);
+	ox810sata_ioportraid_andor(priv, ap, ORB4, 0, ap->ctl << 24);
 
 	// command the core to send a control FIS
-	ox810sata_send_control_fis(ap, CMD_WRITE_TO_ORB_REGS_NO_COMMAND);
+	ox810sata_send_control_fis(priv, ap, CMD_WRITE_TO_ORB_REGS_NO_COMMAND);
 	mdelay(ATA_WAIT_AFTER_RESET);
 }
 
 static int ox810sata_scr_read(struct ata_link *link, unsigned int sc_reg,
 			      u32 *val)
 {
-	*val = ox810sata_scr_read_port(link->ap, sc_reg);
+	struct ox810sata_port_priv *pd = (struct ox810sata_port_priv *)link->ap->private_data;
+	*val = ox810sata_scr_read_port(pd->priv, link->ap, sc_reg);
 	return 0;
 }
 
@@ -846,30 +858,30 @@ static int ox810sata_scr_read(struct ata_link *link, unsigned int sc_reg,
  * @param link_reg the link layer register to access (oxsemi indexing ie
  *        00 = static config, 04 = phy ctrl)
  */
-static void ox810sata_link_write(struct ata_port *ap, unsigned int link_reg,
-				 u32 val, spinlock_t *lock)
+static void ox810sata_link_write(struct ox810sata_host_priv *priv, struct ata_port *ap,
+				 unsigned int link_reg, u32 val, spinlock_t *lock)
 {
 	unsigned long flags = 0;
 
 	if (!NULLPTR(lock) && !in_irq())
 		spin_lock_irqsave(lock, flags);
 
-	ox810sata_link_wait_ready(ap);
+	ox810sata_link_wait_ready(priv, ap);
 
-	ox810sata_ioport_andor(ap, LINK_DATA, 0, val);
+	ox810sata_ioport_andor(priv, ap, LINK_DATA, 0, val);
 
 	// TODO comment
 	wmb();
 	/* accessed twice as a workaround for a bug in the SATA abp bridge
 	 * hardware (bug 6828)
 	 */
-	ox810sata_ioport_andor(ap, LINK_WR_ADDR, 0, link_reg);
+	ox810sata_ioport_andor(priv, ap, LINK_WR_ADDR, 0, link_reg);
 
 	// TODO comment
 	wmb();
-	(void)ox810sata_ioport_read(ap, LINK_WR_ADDR);
+	(void)ox810sata_ioport_read(priv, ap, LINK_WR_ADDR);
 
-	ox810sata_link_wait_ready(ap);
+	ox810sata_link_wait_ready(priv, ap);
 
 	if (!NULLPTR(lock) && !in_irq())
 		spin_unlock_irqrestore(lock, flags);
@@ -886,32 +898,33 @@ static void ox810sata_link_write(struct ata_port *ap, unsigned int link_reg,
  * @param sc_reg the SATA PHY register
  * @param val the value to write into the register
  */
-static void ox810sata_scr_write_port(struct ata_port *ap, unsigned int sc_reg,
-				     u32 val)
+static void ox810sata_scr_write_port(struct ox810sata_host_priv *priv, struct ata_port *ap,
+				     unsigned int sc_reg, u32 val)
 {
 	struct ox810sata_port_priv *pd = NULLPTR(ap) ? NULL : ap->private_data;
 	spinlock_t *lock = NULLPTR(pd) ? NULL : &pd->scrlock;
 
-	ox810sata_link_write(ap, SCR2LINK(sc_reg), val, lock);
+	ox810sata_link_write(priv, ap, SCR2LINK(sc_reg), val, lock);
 }
 
 static int ox810sata_scr_write(struct ata_link *link, unsigned int sc_reg,
 			       u32 val)
 {
-	ox810sata_scr_write_port(link->ap, sc_reg, val);
+	struct ox810sata_port_priv *pd = (struct ox810sata_port_priv *)link->ap->private_data;
+	ox810sata_scr_write_port(pd->priv, link->ap, sc_reg, val);
 	return 0;
 }
 
 /*
  * sends a sync-escape if there is a link present
  */
-static bool ox810sata_sync_escape_send(struct ata_port *const ap)
+static bool ox810sata_sync_escape_send(struct ox810sata_host_priv *priv, struct ata_port *const ap)
 {
 	bool reset = false;
 
 	// read the SSTATUS register and only send a sync escape if there is a link active
-	if (ox810sata_check_link(ap)) {
-		ox810sata_ioport_andor(ap, SATA_COMMAND, ~SATA_OPCODE_MASK,
+	if (ox810sata_check_link(priv, ap)) {
+		ox810sata_ioport_andor(priv, ap, SATA_COMMAND, ~SATA_OPCODE_MASK,
 				       CMD_SYNC_ESCAPE);
 		reset = true;
 	}
@@ -919,21 +932,21 @@ static bool ox810sata_sync_escape_send(struct ata_port *const ap)
 	return reset;
 }
 
-static void ox810sata_phy_error_clear(struct ata_port *const ap)
+static void ox810sata_phy_error_clear(struct ox810sata_host_priv *priv, struct ata_port *const ap)
 {
 	// clear phy/link errors
-	ox810sata_scr_write_port(ap, SCR_ERROR, ~0);
+	ox810sata_scr_write_port(priv, ap, SCR_ERROR, ~0);
 }
 
-static void ox810sata_errors_clear(struct ata_port *const ap)
+static void ox810sata_errors_clear(struct ox810sata_host_priv *priv, struct ata_port *const ap)
 {
-	ox810sata_reg_access_error_clear(ap);
-	ox810sata_cs_error_clear(ap);
-	ox810sata_sctl_error_clear(ap);
-	ox810sata_phy_error_clear(ap);
+	ox810sata_reg_access_error_clear(priv, ap);
+	ox810sata_cs_error_clear(priv, ap);
+	ox810sata_sctl_error_clear(priv, ap);
+	ox810sata_phy_error_clear(priv, ap);
 }
 
-static bool ox810sata_link_hard_reset(struct ata_port *ap)
+static bool ox810sata_link_hard_reset(struct ox810sata_host_priv *priv, struct ata_port *ap)
 {
 	int tries = 3;
 	int rc;
@@ -942,11 +955,11 @@ static bool ox810sata_link_hard_reset(struct ata_port *ap)
 		const unsigned long *timing =
 			sata_ehc_deb_timing(&ap->link.eh_context);
 
-		ox810sata_errors_clear(ap);
+		ox810sata_errors_clear(priv, ap);
 		rc = sata_link_hardreset(&ap->link, timing,
 					 msecs_to_jiffies(IDLE_WAIT_MS), NULL,
 					 NULL);
-	} while ((!ox810sata_check_link(ap) || rc) && tries-- > 0);
+	} while ((!ox810sata_check_link(priv, ap) || rc) && tries-- > 0);
 
 	if (rc)
 		ata_port_warn(ap, "link reset fail\n");
@@ -957,36 +970,36 @@ static bool ox810sata_link_hard_reset(struct ata_port *ap)
 /*
  * @param ap ata port
  */
-static bool ox810sata_cleanup(struct ata_port *const ap)
+static bool ox810sata_cleanup(struct ox810sata_host_priv *priv, struct ata_port *const ap)
 {
 	bool both = false;
 
-	ox810sata_irq_off(ap);
+	ox810sata_irq_off(priv, ap);
 
 	// abort DMA
-	ox810sata_errors_clear(ap);
-	ox810sata_dma_abort();
-	if (ox810sata_core_idle_wait())
+	ox810sata_errors_clear(priv, ap);
+	ox810sata_dma_abort(priv);
+	if (ox810sata_core_idle_wait(priv))
 		goto cleanup_exit;
 
 	// link hard reset
-	if (ox810sata_link_hard_reset(ap))
+	if (ox810sata_link_hard_reset(priv, ap))
 		goto cleanup_exit;
 
-	if (ox810sata_core_idle_wait())
+	if (ox810sata_core_idle_wait(priv))
 		goto cleanup_exit;
 
 	// send sync escape code
-	ox810sata_errors_clear(ap);
-	if (ox810sata_sync_escape_send(ap)) {
-		if (ox810sata_core_idle_wait())
+	ox810sata_errors_clear(priv, ap);
+	if (ox810sata_sync_escape_send(priv, ap)) {
+		if (ox810sata_core_idle_wait(priv))
 			goto cleanup_exit;
-		ox810sata_errors_clear(ap);
+		ox810sata_errors_clear(priv, ap);
 	}
 
 	// SRST
-	ox810sata_srst_send(ap);
-	if (ox810sata_core_idle_wait())
+	ox810sata_srst_send(priv, ap);
+	if (ox810sata_core_idle_wait(priv))
 		goto cleanup_exit;
 
 	/* Perform any SATA core re-initialisation after reset */
@@ -994,14 +1007,14 @@ static bool ox810sata_cleanup(struct ata_port *const ap)
 
 	// core not recovering, reset it (with both ports)
 	both = true;
-	ox810sata_core_reset();
+	ox810sata_core_reset(priv);
 
 cleanup_exit:
 	if (both)
 		ata_port_warn(ap, "core reset!\n");
 
-	ox810sata_errors_clear(ap);
-	ox810sata_irq_on(ap);
+	ox810sata_errors_clear(priv, ap);
+	ox810sata_irq_on(priv, ap);
 	return both;
 }
 
@@ -1016,36 +1029,35 @@ static void ox810sata_dev_config(struct ata_device *const pdev)
 {
 	struct ata_port *ap = pdev->link->ap;
 	struct ox810sata_port_priv *pd = NULLPTR(ap) ? NULL : ap->private_data;
+	struct ox810sata_host_priv *priv = pd->priv;
 
-	pr_info("\n");
-
-	(void)ox810sata_core_idle_wait();
+	(void)ox810sata_core_idle_wait(priv);
 
 	// turn on phy error detection by removing the masks
-	ox810sata_link_write(ap, 0x0C, 0x00030003,
+	ox810sata_link_write(priv, ap, 0x0C, 0x00030003,
 			     NULLPTR(pd) ? NULL : &pd->scrlock);
 
 	// tune for sata compatibility
-	ox810sata_scr_write_port(ap, 0x10, 0x00002988);
-	ox810sata_scr_write_port(ap, 0x14, 0x00055629);
+	ox810sata_scr_write_port(priv, ap, 0x10, 0x00002988);
+	ox810sata_scr_write_port(priv, ap, 0x14, 0x00055629);
 
 	// enable hotplug event detection
-	ox810sata_scr_write_port(ap, SERROR_IRQ_MASK, 0x03feffff);
-	ox810sata_scr_write_port(ap, SCR_ACTIVE, ~0 & ~(1 << 26) & ~(1 << 16));
+	ox810sata_scr_write_port(priv, ap, SERROR_IRQ_MASK, 0x03feffff);
+	ox810sata_scr_write_port(priv ,ap, SCR_ACTIVE, ~0 & ~(1 << 26) & ~(1 << 16));
 
 	/* Set the bits to put the interface into 28 or 48-bit node */
-	ox810sata_ioport_andor(ap, DRIVE_CONTROL,
+	ox810sata_ioport_andor(priv, ap, DRIVE_CONTROL,
 			       /* mask out the pair of bits associaed with each port */
-			       ~(3 << (ox810sata_port_no(ap) * 2)),
+			       ~(3 << (ox810sata_port_no(priv, ap) * 2)),
 			       /* set the mode pair associated with each port */
 			       ((pdev->flags & ATA_DFLAG_LBA48) ? DR_CON_48 : DR_CON_28)
-				<< (ox810sata_port_no(ap) * 2));
+				<< (ox810sata_port_no(priv, ap) * 2));
 
 	/* if this is an ATA-6 disk, put the port into ATA-5 auto translate mode */
 	if (pdev->flags & ATA_DFLAG_LBA48)
-		ox810sata_ioport_andor(ap, PORT_CONTROL, ~0, 0x2);
+		ox810sata_ioport_andor(priv, ap, PORT_CONTROL, ~0, 0x2);
 
-	ox810sata_phy_error_clear(ap);
+	ox810sata_phy_error_clear(priv, ap);
 }
 
 /*
@@ -1082,7 +1094,7 @@ static void tfdump(const struct ata_taskfile *tf, bool ld)
  * @param ap hardware with the registers in
  * @param tf taskfile to write to the registers
  */
-static void ox810sata_tf_load(struct ata_port *ap,
+static void ox810sata_tf_load(struct ox810sata_host_priv *priv, struct ata_port *ap,
 			      const struct ata_taskfile *tf)
 {
 	u32 orb1 = 0;
@@ -1091,13 +1103,11 @@ static void ox810sata_tf_load(struct ata_port *ap,
 	u32 orb4 = 0;
 	unsigned int is_addr = tf->flags & ATA_TFLAG_ISADDR;
 
-	pr_info("\n");
-
 	/* if the control register has changed, write it */
 	if (tf->ctl != ap->last_ctl) {
 		orb4 = tf->ctl << 24;
 		/* write value to register */
-		ox810sata_ioportraid_andor(ap, ORB4, 0, orb4);
+		ox810sata_ioportraid_andor(priv, ap, ORB4, 0, orb4);
 		ap->last_ctl = tf->ctl;
 		ata_wait_idle(ap);
 	}
@@ -1105,12 +1115,8 @@ static void ox810sata_tf_load(struct ata_port *ap,
 	/* check if the ctl register has interrupts disabled or enabled and
 	 * modify the interrupt enable registers on the ata core as required
 	 */
-	if (tf->ctl & ATA_NIEN) {
+	if (tf->ctl & ATA_NIEN)
 		ata_port_warn(ap, "NIEN!\n");
-		//        ox810sata_irq_off(ap);
-		//    } else {
-		//        ox810sata_irq_on(ap);
-	}
 
 	orb2 |= (tf->command) << 24;
 
@@ -1143,10 +1149,10 @@ static void ox810sata_tf_load(struct ata_port *ap,
 		orb1 |= (tf->device) << 24;
 
 	/* write values to registers */
-	ox810sata_ioportraid_andor(ap, ORB1, 0, orb1);
-	ox810sata_ioportraid_andor(ap, ORB2, 0, orb2);
-	ox810sata_ioportraid_andor(ap, ORB3, 0, orb3);
-	ox810sata_ioportraid_andor(ap, ORB4, 0, orb4);
+	ox810sata_ioportraid_andor(priv, ap, ORB1, 0, orb1);
+	ox810sata_ioportraid_andor(priv, ap, ORB2, 0, orb2);
+	ox810sata_ioportraid_andor(priv, ap, ORB3, 0, orb3);
+	ox810sata_ioportraid_andor(priv, ap, ORB4, 0, orb4);
 
 	ata_wait_idle(ap);
 
@@ -1159,19 +1165,18 @@ static void ox810sata_tf_load(struct ata_port *ap,
  * @param ap hardware with the registers in
  * @param tf taskfile to read the registers into
  */
-static void ox810sata_tf_read(struct ata_port *ap, struct ata_taskfile *tf)
+static void ox810sata_tf_read(struct ox810sata_host_priv *priv, struct ata_port *ap,
+			      struct ata_taskfile *tf)
 {
 	/* read the orb registers */
 	u32 orb1, orb2, orb3, orb4;
 
 	ata_wait_idle(ap);
 
-	orb1 = ox810sata_ioportraid_read(ap, ORB1);
-	orb2 = ox810sata_ioportraid_read(ap, ORB2);
-	orb3 = ox810sata_ioportraid_read(ap, ORB3);
-	orb4 = ox810sata_ioportraid_read(ap, ORB4);
-
-	pr_info("\n");
+	orb1 = ox810sata_ioportraid_read(priv, ap, ORB1);
+	orb2 = ox810sata_ioportraid_read(priv, ap, ORB2);
+	orb3 = ox810sata_ioportraid_read(priv, ap, ORB3);
+	orb4 = ox810sata_ioportraid_read(priv, ap, ORB4);
 
 	/* read common 28/48 bit tf parameters */
 	tf->device = (orb1 >> 24);
@@ -1204,20 +1209,24 @@ static void ox810sata_tf_read(struct ata_port *ap, struct ata_taskfile *tf)
 static void ox810sata_dma_callback(void *arg)
 {
 	struct ata_port *ap = (void *)arg;
+	struct ox810sata_port_priv *pd = (struct ox810sata_port_priv *)ap->private_data;
+	struct ox810sata_host_priv *priv = pd->priv;
 
-	if (!NULLPTR(ox810sata_hd.desc)) {
-		ox810sata_hd.desc->callback = NULL;
-		ox810sata_hd.desc = NULL;
+	if (!NULLPTR(priv->desc)) {
+		priv->desc->callback = NULL;
+		priv->desc = NULL;
 	}
 
-	ox810sata_qc_complete(ap, AC_ERR_OK);
+	ox810sata_qc_complete(priv, ap, AC_ERR_OK);
 }
 
 static int ox810sata_qc_defer(struct ata_queued_cmd *qc)
 {
+	struct ox810sata_port_priv *pd = (struct ox810sata_port_priv *)qc->ap->private_data;
+	struct ox810sata_host_priv *priv = pd->priv;
 	int ret;
 
-	if (ox810sata_core_busy_check() || ox810sata_dma_busy_check(qc->ap))
+	if (ox810sata_core_busy_check(priv) || ox810sata_dma_busy_check(priv, qc->ap))
 		return ATA_DEFER_LINK;
 
 	ret = ata_std_qc_defer(qc);
@@ -1237,6 +1246,7 @@ static enum ata_completion_errors ox810sata_qc_prep(struct ata_queued_cmd *qc)
 {
 	struct ata_port *ap = NULLPTR(qc) ? NULL : qc->ap;
 	struct ox810sata_port_priv *pd = NULLPTR(ap) ? NULL : ap->private_data;
+	struct ox810sata_host_priv *priv = pd->priv;
 	bool raid_reg = false; // default to no raid
 	int tries = 1;
 	bool port_fail, other_port_fail = false;
@@ -1248,39 +1258,35 @@ static enum ata_completion_errors ox810sata_qc_prep(struct ata_queued_cmd *qc)
 	// If it is an internal cmd then there was no qc_defer
 	if (ata_tag_internal(qc->tag)) {
 		tries = 3;
-		while ((!ox810sata_core_idle_wait() ||
-			ox810sata_dma_busy_check(qc->ap)) &&
-		       tries-- > 0) {
-			if (ox810sata_cleanup(ap))
+		while ((!ox810sata_core_idle_wait(priv) ||
+		        ox810sata_dma_busy_check(priv, qc->ap)) && tries-- > 0) {
+			if (ox810sata_cleanup(priv, ap))
 				break;
 		}
 	}
 
 	// get raid settings from the bio if they exist
 	if (qc->scsicmd && qc->scsicmd->request && qc->scsicmd->request->bio) {
-		if (ox810sata_hd.hw_raid_active != raid_reg) {
-			pr_info("hardware RAID %s",
-				raid_reg ? "activated" : "deactivated");
-			ox810sata_hd.hw_raid_active = raid_reg;
+		if (priv->hw_raid_active != raid_reg) {
+			pr_info("hardware RAID %s", raid_reg ? "activated" : "deactivated");
+			priv->hw_raid_active = raid_reg;
 		}
 	}
 
-	ox810sata_irq_on(ap);
+	ox810sata_irq_on(priv, ap);
 
 	tries = 1;
 	while (1) {
 		// check for failed ports prior to issuing raid-ed commands
-		port_fail = ox810sata_check_link(ap) ? false : true;
+		port_fail = ox810sata_check_link(priv, ap) ? false : true;
 		other_port_fail = false;
-		if (ox810sata_hd.hw_raid_active)
-			other_port_fail =
-				!ox810sata_check_link(ox810sata_other_ap(ap));
+		if (priv->hw_raid_active)
+			other_port_fail = !ox810sata_check_link(priv, ox810sata_other_ap(priv, ap));
 
 		ox810sata_accumulated_RAID_faults |=
-			port_fail ? 1UL << ox810sata_port_no(ap) : 0;
+			port_fail ? 1UL << ox810sata_port_no(priv, ap) : 0;
 		ox810sata_accumulated_RAID_faults |=
-			other_port_fail ? 1UL << ox810sata_other_port_no(ap) :
-					  0;
+			other_port_fail ? 1UL << ox810sata_other_port_no(priv, ap) :  0;
 
 		if (tries-- == 0) {
 			if (port_fail || other_port_fail)
@@ -1290,24 +1296,24 @@ static enum ata_completion_errors ox810sata_qc_prep(struct ata_queued_cmd *qc)
 		if (!port_fail && !other_port_fail)
 			break;
 
-		if (ox810sata_cleanup(ap))
+		if (ox810sata_cleanup(priv, ap))
 			break;
 	}
 
-	if (ox810sata_hd.hw_raid_active) {
-		ox810sata_hd.active_ap = ap;
+	if (priv->hw_raid_active) {
+		priv->active_ap = ap;
 
 		// at the moment we only do raid-1
-		ox810sata_iocore_andor(RAID_CONTROL, 0, OXNASSATA_RAID1);
-		ox810sata_iocore_andor(RAID_SET, 0, OXNASSATA_RAID_TWODISKS);
+		ox810sata_iocore_andor(priv, RAID_CONTROL, 0, OXNASSATA_RAID1);
+		ox810sata_iocore_andor(priv, RAID_SET, 0, OXNASSATA_RAID_TWODISKS);
 	} else {
 		// Set the RAID controller hardware to idle
-		ox810sata_iocore_andor(RAID_CONTROL, 0, OXNASSATA_NOTRAID);
+		ox810sata_iocore_andor(priv, RAID_CONTROL, 0, OXNASSATA_NOTRAID);
 	}
 
-	(void)ox810sata_core_idle_wait();
+	(void)ox810sata_core_idle_wait(priv);
 
-	ox810sata_tf_load(ap, &qc->tf);
+	ox810sata_tf_load(priv, ap, &qc->tf);
 
 	return ox810sata_qc_data_protocol(qc) ? ata_bmdma_qc_prep(qc) :
 						AC_ERR_OK;
@@ -1325,55 +1331,58 @@ static unsigned int ox810sata_qc_issue(struct ata_queued_cmd *qc)
 {
 	struct ata_port *ap = NULLPTR(qc) ? NULL : qc->ap;
 	struct ox810sata_port_priv *pd = NULLPTR(ap) ? NULL : ap->private_data;
+	struct ox810sata_host_priv *priv = pd->priv;
 
-	(void)ox810sata_core_idle_wait();
+	(void)ox810sata_core_idle_wait(priv);
 
 	if (!NULLPTR(pd))
 		pd->active_qc = qc;
 
-	if (!NULLPTR(ox810sata_hd.chan)) {
+	if (!NULLPTR(priv->chan)) {
 		if (ox810sata_qc_data_protocol(qc) && !NULLPTR(qc->sg)) {
 			struct dma_slave_config sconf;
 
 			if (qc->dma_dir == DMA_FROM_DEVICE) {
-				sconf.src_addr = ox810sata_hd.data_phys;
+				sconf.src_addr = priv->data_phys;
 				sconf.direction = DMA_DEV_TO_MEM;
 			} else {
-				sconf.dst_addr = ox810sata_hd.data_phys;
+				sconf.dst_addr = priv->data_phys;
 				sconf.direction = DMA_MEM_TO_DEV;
 			}
-			dmaengine_slave_config(ox810sata_hd.chan, &sconf);
-			ox810sata_hd.desc = dmaengine_prep_slave_sg(ox810sata_hd.chan, qc->sg,
+			dmaengine_slave_config(priv->chan, &sconf);
+			priv->desc = dmaengine_prep_slave_sg(priv->chan, qc->sg,
 								    qc->n_elem,
 								    qc->dma_dir,
 								    DMA_PREP_INTERRUPT |
 								    DMA_CTRL_ACK);
-			if (!NULLPTR(ox810sata_hd.desc)) {
-				ox810sata_hd.desc->callback =
-					ox810sata_dma_callback;
-				ox810sata_hd.desc->callback_param = ap;
-				dmaengine_submit(ox810sata_hd.desc);
+			if (!NULLPTR(priv->desc)) {
+				priv->desc->callback = ox810sata_dma_callback;
+				priv->desc->callback_param = ap;
+				dmaengine_submit(priv->desc);
 			}
-			dma_async_issue_pending(ox810sata_hd.chan);
+			dma_async_issue_pending(priv->chan);
 		} else {
-			if (!NULLPTR(ox810sata_hd.desc)) {
-				ox810sata_hd.desc->callback = NULL;
-				ox810sata_hd.desc = NULL;
+			if (!NULLPTR(priv->desc)) {
+				priv->desc->callback = NULL;
+				priv->desc = NULL;
 			}
 		}
 	}
 
 	// Command that the orb registers get written to drive
-	ox810sata_send_control_fis(ap, CMD_WRITE_TO_ORB_REGS);
+	ox810sata_send_control_fis(priv, ap, CMD_WRITE_TO_ORB_REGS);
 
 	return AC_ERR_OK;
 }
 
 static bool ox810sata_qc_fill_rtf(struct ata_queued_cmd *qc)
 {
-	(void)ox810sata_core_idle_wait();
+	struct ox810sata_port_priv *pd = (struct ox810sata_port_priv *)qc->ap->private_data;
+	struct ox810sata_host_priv *priv = pd->priv;
 
-	ox810sata_tf_read(qc->ap, &qc->result_tf);
+	(void)ox810sata_core_idle_wait(priv);
+
+	ox810sata_tf_read(priv, qc->ap, &qc->result_tf);
 	return true;
 }
 
@@ -1383,29 +1392,33 @@ static bool ox810sata_qc_fill_rtf(struct ata_queued_cmd *qc)
  */
 static irqreturn_t ox810sata_irq_handler(int irq, void *dev_instance)
 {
+	struct ox810sata_port_priv *pd;
+	struct ox810sata_host_priv *priv;
 	int cnr, port_no;
 	irqreturn_t ret = IRQ_NONE;
 
 	for (port_no = 0; port_no < SATA_OXNAS_MAX_PORTS; port_no++) {
-		struct ata_port *ap =
-			((struct ata_host *)dev_instance)->ports[port_no];
+		struct ata_port *ap = ((struct ata_host *)dev_instance)->ports[port_no];
 		u32 int_status = 0;
 
 		if (NULLPTR(ap))
 			continue;
 
+		pd = (struct ox810sata_port_priv *)ap->private_data;
+		priv = pd->priv;
+
 		// check the ISR for the port to see if it created the interrupt
 		cnr = 0;
 		while (cnr < 3) {
-			u32 i = ox810sata_ioportraid_read(ap, INT_STATUS) &
+			u32 i = ox810sata_ioportraid_read(priv, ap, INT_STATUS) &
 				INT_USED;
 
 			if (!i)
 				break;
 
 			// Clear and mask pending interrupts
-			ox810sata_ioportraid_andor(ap, INT_CLEAR, 0, i);
-			ox810sata_ioportraid_andor(ap, INT_DISABLE, 0, i);
+			ox810sata_ioportraid_andor(priv, ap, INT_CLEAR, 0, i);
+			ox810sata_ioportraid_andor(priv, ap, INT_DISABLE, 0, i);
 
 			// store interrupt status for the bottom end
 			int_status |= i;
@@ -1419,17 +1432,15 @@ static irqreturn_t ox810sata_irq_handler(int irq, void *dev_instance)
 				pr_debug("irq#%d status=0x%08X cnr=%d\n", irq,
 					 int_status, cnr);
 
-			if (!ox810sata_dma_busy_check(ap)) {
+			if (!ox810sata_dma_busy_check(priv, ap)) {
 				if (int_status & INT_END_OF_CMD)
-					ox810sata_qc_complete(ap, AC_ERR_OK);
+					ox810sata_qc_complete(priv, ap, AC_ERR_OK);
 			}
 
 			if (int_status & (INT_LINK_SERROR | INT_LINK_IRQ)) {
-				u32 serror =
-					ox810sata_scr_read_port(ap, SCR_ERROR);
+				u32 serror = ox810sata_scr_read_port(priv, ap, SCR_ERROR);
 
-				if (serror &
-				    (SERR_DEV_XCHG | SERR_PHYRDY_CHG)) {
+				if (serror & (SERR_DEV_XCHG | SERR_PHYRDY_CHG)) {
 					ata_port_info(ap, "hotplug event\n");
 					ap->link.eh_info.action |= ATA_EH_RESET;
 					ata_ehi_hotplugged(&ap->link.eh_info);
@@ -1454,6 +1465,7 @@ static irqreturn_t ox810sata_irq_handler(int irq, void *dev_instance)
  */
 static int ox810sata_port_start(struct ata_port *ap)
 {
+	struct ox810sata_host_priv *priv = (struct ox810sata_host_priv *)ap->host->private_data;
 	struct ox810sata_port_priv *pd;
 	int rc;
 
@@ -1462,12 +1474,13 @@ static int ox810sata_port_start(struct ata_port *ap)
 		return rc;
 
 	/* allocate port private data memory and attach to port */
-	pd = devm_kzalloc(&ox810sata_hd.pdev->dev, sizeof(*pd), GFP_KERNEL);
+	pd = devm_kzalloc(&priv->pdev->dev, sizeof(*pd), GFP_KERNEL);
 	if (NULLPTR(pd))
 		return -ENOMEM;
 
 	ap->private_data = pd;
 	ap->print_id = ap->port_no + 1;
+	pd->priv = priv;
 	pd->port = ap;
 	pd->scrlock = __SPIN_LOCK_UNLOCKED(pd->scrlock);
 
@@ -1475,7 +1488,7 @@ static int ox810sata_port_start(struct ata_port *ap)
 
 	// Additional cleanup/reset(s) to workaround for
 	// core not responding when issuing first queued command
-	(void)ox810sata_cleanup(ap);
+	(void)ox810sata_cleanup(priv, ap);
 
 	return 0;
 }
@@ -1487,24 +1500,30 @@ static int ox810sata_port_start(struct ata_port *ap)
  */
 static void ox810sata_port_stop(struct ata_port *ap)
 {
-	ox810sata_qc_complete(ap, AC_ERR_OK);
-	(void)ox810sata_cleanup(ap);
-	ox810sata_irq_off(ap);
+	struct ox810sata_port_priv *pd = ap->private_data;
+
+	ox810sata_qc_complete(pd->priv, ap, AC_ERR_OK);
+	(void)ox810sata_cleanup(pd->priv, ap);
+	ox810sata_irq_off(pd->priv, ap);
 }
 
 static void ox810sata_error_handler(struct ata_port *ap)
 {
-	(void)ox810sata_cleanup(ap);
+	struct ox810sata_port_priv *pd = ap->private_data;
+
+	(void)ox810sata_cleanup(pd->priv, ap);
 
 	ata_std_error_handler(ap);
 }
 
 static void ox810sata_post_internal_cmd(struct ata_queued_cmd *qc)
 {
+	struct ox810sata_port_priv *pd = qc->ap->private_data;
+
 	pr_debug("ata%u: tag#%u\n", qc->ap->print_id, qc->tag);
 
 	if (qc->flags & ATA_QCFLAG_FAILED)
-		ox810sata_cleanup(qc->ap);
+		ox810sata_cleanup(pd->priv, qc->ap);
 }
 
 static int ox810sata_check_ready(struct ata_link *link)
@@ -1519,6 +1538,8 @@ static int ox810sata_softreset(struct ata_link *link, unsigned int *class,
 {
 	int rc;
 	struct ata_port *ap = link->ap;
+	struct ox810sata_port_priv *pd = (struct ox810sata_port_priv *)ap->private_data;
+	struct ox810sata_host_priv *priv = pd->priv;
 	struct ata_taskfile tf;
 
 	if (ata_link_offline(link)) {
@@ -1528,7 +1549,7 @@ static int ox810sata_softreset(struct ata_link *link, unsigned int *class,
 		return 0;
 	}
 
-	ox810sata_srst_send(ap);
+	ox810sata_srst_send(priv, ap);
 
 	rc = ata_wait_ready(link, deadline, ox810sata_check_ready);
 
@@ -1539,7 +1560,7 @@ static int ox810sata_softreset(struct ata_link *link, unsigned int *class,
 	}
 
 	// determine by signature whether we have ATA or ATAPI devices
-	ox810sata_tf_read(ap, &tf);
+	ox810sata_tf_read(priv, ap, &tf);
 	if (!NULLPTR(class)) {
 		*class = ata_dev_classify(&tf);
 
@@ -1601,6 +1622,7 @@ static const struct ata_port_info ox810sata_port_info = {
  */
 static int ox810sata_driver_probe(struct platform_device *pdev)
 {
+	struct ox810sata_host_priv *priv;
 	u32 version;
 	void __iomem *port_base = NULL, *port_end = NULL;
 	const struct ata_port_info *port_info[] = { &ox810sata_port_info,
@@ -1608,6 +1630,10 @@ static int ox810sata_driver_probe(struct platform_device *pdev)
 						    NULL };
 	struct resource *res;
 	int i, rc, irq = 0, n_ports = SATA_OXNAS_MAX_PORTS;
+
+	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	if (NULLPTR(priv))
+		return -ENOMEM;
 
 	// Get IRQ line
 	if (!NULLPTR(pdev->dev.of_node))
@@ -1627,49 +1653,49 @@ static int ox810sata_driver_probe(struct platform_device *pdev)
 		goto error_exit_with_cleanup;
 	}
 	port_end = port_base + resource_size(res) - 1;
-	ox810sata_hd.iomap = port_base;
-	ox810sata_hd.pdev = pdev;
+	priv->iomap = port_base;
+	priv->pdev = pdev;
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
-	ox810sata_hd.data_phys = res->start;
+	priv->data_phys = res->start;
 
 	// Hold on to a DMA channel for the life of the SATA driver
-	rc = ox810sata_dma_alloc();
+	rc = ox810sata_dma_alloc(priv);
 	if (rc)
 		goto error_exit_with_cleanup;
 
-	ox810sata_hd.clk = of_clk_get(pdev->dev.of_node, 0);
-	if (IS_ERR(ox810sata_hd.clk)) {
-		rc = PTR_ERR(ox810sata_hd.clk);
-		ox810sata_hd.clk = NULL;
+	priv->clk = of_clk_get(pdev->dev.of_node, 0);
+	if (IS_ERR(priv->clk)) {
+		rc = PTR_ERR(priv->clk);
+		priv->clk = NULL;
 		goto error_exit_with_cleanup;
 	}
 
-	ox810sata_hd.rst_sata = devm_reset_control_get(&pdev->dev, "sata");
-	if (IS_ERR(ox810sata_hd.rst_sata)) {
-		rc = PTR_ERR(ox810sata_hd.rst_sata);
-		ox810sata_hd.rst_sata = NULL;
+	priv->rst_sata = devm_reset_control_get(&pdev->dev, "sata");
+	if (IS_ERR(priv->rst_sata)) {
+		rc = PTR_ERR(priv->rst_sata);
+		priv->rst_sata = NULL;
 		goto error_exit_with_cleanup;
 	}
 
-	ox810sata_hd.rst_link = devm_reset_control_get(&pdev->dev, "link");
-	if (IS_ERR(ox810sata_hd.rst_link)) {
-		rc = PTR_ERR(ox810sata_hd.rst_link);
-		ox810sata_hd.rst_link = NULL;
+	priv->rst_link = devm_reset_control_get(&pdev->dev, "link");
+	if (IS_ERR(priv->rst_link)) {
+		rc = PTR_ERR(priv->rst_link);
+		priv->rst_link = NULL;
 		goto error_exit_with_cleanup;
 	}
 
-	ox810sata_hd.rst_phy = devm_reset_control_get(&pdev->dev, "phy");
-	if (IS_ERR(ox810sata_hd.rst_phy)) {
-		rc = PTR_ERR(ox810sata_hd.rst_phy);
-		ox810sata_hd.rst_phy = NULL;
+	priv->rst_phy = devm_reset_control_get(&pdev->dev, "phy");
+	if (IS_ERR(priv->rst_phy)) {
+		rc = PTR_ERR(priv->rst_phy);
+		priv->rst_phy = NULL;
 		goto error_exit_with_cleanup;
 	}
 
-	ox810sata_clock_enable();
+	ox810sata_clock_enable(priv);
 	mdelay(1);
 	// reset the core
-	ox810sata_core_reset();
+	ox810sata_core_reset(priv);
 
 	// Get and check number of ports
 	if (!NULLPTR(pdev->dev.of_node)) {
@@ -1682,9 +1708,9 @@ static int ox810sata_driver_probe(struct platform_device *pdev)
 		}
 	}
 
-	version = ox810sata_ioport_read(NULL, SATA_VERSION);
+	version = ox810sata_ioport_read(priv, NULL, SATA_VERSION);
 	if (n_ports > 1 &&
-	    ox810sata_ioport_read(NULL, PORT_SIZE + SATA_VERSION) != version) {
+	    ox810sata_ioport_read(priv, NULL, PORT_SIZE + SATA_VERSION) != version) {
 		n_ports = 1;
 		port_info[1] = NULL;
 	}
@@ -1694,37 +1720,36 @@ static int ox810sata_driver_probe(struct platform_device *pdev)
 	case SATA_OXNAS_CORE_VERSION:
 		pr_info("934 %s SATA core v%u.%02X (0x%08X), iomap=[0x%08X-0x%08X]\n",
 			n_ports > 1 ? "two-ports" : "single-port", version >> 8,
-			version & 0xFF, ox810sata_iocore_read(SATA_VERSION),
+			version & 0xFF, ox810sata_iocore_read(priv, SATA_VERSION),
 			(u32)port_base, (u32)port_end);
 		break;
 	default:
 		pr_err("unknown SATA core (v%u.%02X/0x%08X, iomap=[0x%08X-0x%08X])\n",
 		       version >> 8, version & 0xFF,
-		       ox810sata_iocore_read(SATA_VERSION), (u32)port_base,
+		       ox810sata_iocore_read(priv, SATA_VERSION), (u32)port_base,
 		       (u32)port_end);
 		rc = -EINVAL;
 		goto error_exit_with_cleanup;
 	}
 
 	// allocate memory and check
-	ox810sata_hd.host =
-		ata_host_alloc_pinfo(&pdev->dev, port_info, n_ports);
-	if (!NULLPTR(ox810sata_hd.host) && !IS_ERR(ox810sata_hd.host)) {
-		ox810sata_hd.host->private_data = &ox810sata_hd; // recursion
+	priv->host = ata_host_alloc_pinfo(&pdev->dev, port_info, n_ports);
+	if (!NULLPTR(priv->host) && !IS_ERR(priv->host)) {
+		priv->host->private_data = priv; // recursion
 		// call ata_device_add and begin probing for drives
-		rc = ata_host_activate(ox810sata_hd.host, irq,
+		rc = ata_host_activate(priv->host, irq,
 				       ox810sata_irq_handler,
 				       SATA_OXNAS_IRQ_FLAG, &ox810sata_sht);
 		if (rc) {
-			ox810sata_hd.host = NULL;
+			priv->host = NULL;
 			goto error_exit_with_cleanup;
 		}
 	}
-	if (IS_ERR(ox810sata_hd.host)) {
-		rc = PTR_ERR(ox810sata_hd.host);
-		ox810sata_hd.host = NULL;
+	if (IS_ERR(priv->host)) {
+		rc = PTR_ERR(priv->host);
+		priv->host = NULL;
 	}
-	if (NULLPTR(ox810sata_hd.host)) {
+	if (NULLPTR(priv->host)) {
 		if (!rc)
 			rc = -ENOMEM;
 		pr_err("couldn't create an ata host, error %d\n", rc);
@@ -1744,18 +1769,18 @@ static int ox810sata_driver_probe(struct platform_device *pdev)
 error_exit_with_cleanup:
 	if (irq > 0 && !NULLPTR(pdev->dev.of_node))
 		irq_dispose_mapping(irq);
-	if (!NULLPTR(ox810sata_hd.clk))
-		clk_put(ox810sata_hd.clk);
-	if (!NULLPTR(ox810sata_hd.rst_sata))
-		reset_control_put(ox810sata_hd.rst_sata);
-	if (!NULLPTR(ox810sata_hd.rst_link))
-		reset_control_put(ox810sata_hd.rst_link);
-	if (!NULLPTR(ox810sata_hd.rst_phy))
-		reset_control_put(ox810sata_hd.rst_phy);
-	if (!NULLPTR(ox810sata_hd.host))
-		ata_host_detach(ox810sata_hd.host);
-	ox810sata_dma_free();
-	ox810sata_clock_disable();
+	if (!NULLPTR(priv->clk))
+		clk_put(priv->clk);
+	if (!NULLPTR(priv->rst_sata))
+		reset_control_put(priv->rst_sata);
+	if (!NULLPTR(priv->rst_link))
+		reset_control_put(priv->rst_link);
+	if (!NULLPTR(priv->rst_phy))
+		reset_control_put(priv->rst_phy);
+	if (!NULLPTR(priv->host))
+		ata_host_detach(priv->host);
+	ox810sata_dma_free(priv);
+	ox810sata_clock_disable(priv);
 	return rc;
 }
 
@@ -1766,16 +1791,17 @@ error_exit_with_cleanup:
 static int ox810sata_driver_remove(struct platform_device *pdev)
 {
 	struct ata_host *host = dev_get_drvdata(&pdev->dev);
+	struct ox810sata_host_priv *priv = (struct ox810sata_host_priv *)host->private_data;
 	unsigned int i;
 
 	for (i = 0; i < host->n_ports; i++)
 		scsi_remove_host(host->ports[i]->scsi_host);
 
-	ox810sata_dma_free();
+	ox810sata_dma_free(priv);
 
 	// Hold reset to the SATA block
 	// !!! This is needed for normal bootloader start !!!
-	ox810sata_core_reset_start();
+	ox810sata_core_reset_start(priv);
 
 	return 0;
 }
